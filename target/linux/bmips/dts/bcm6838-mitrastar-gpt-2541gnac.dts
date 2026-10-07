@@ -8,7 +8,7 @@
 
 	memory@0 {
 		device_type = "memory";
-		reg = <0x00000000 0x10000000>;
+		reg = <0x00000000 0x08000000>;
 	};
 
 #if 0
@@ -78,7 +78,7 @@
 };
 
 &nflash {
-	status = "okay";
+	status = "disabled";
 
 	nandcs@0 {
 		compatible = "brcm,nandcs";

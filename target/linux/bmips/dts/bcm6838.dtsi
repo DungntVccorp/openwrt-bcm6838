@@ -21,7 +21,7 @@
 	};
 
 	chosen {
-		bootargs = "earlycon";
+		bootargs = "earlycon console=ttyS0,115200 maxcpus=1";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -107,14 +107,15 @@
 		periph_intc: interrupt-controller@14e00040 {
 			#address-cells = <1>;
 			compatible = "brcm,bcm6345-l1-intc";
-			reg =   <0x14e00040 0x08>, <0x14E00048 0x08>,
-				<0x14E00348 0x08>, <0x14E00350 0x08>;
+			/* TP0 uses the second mask pair and IP4, TP1 the first and IP3 (verified on HW) */
+			reg =   <0x14e00048 0x08>, <0x14e00040 0x08>,
+				<0x14e00350 0x08>, <0x14e00348 0x08>;
 
 			interrupt-controller;
 			#interrupt-cells = <1>;
 
 			interrupt-parent = <&cpu_intc>;
-			interrupts = <3>, <4>;
+			interrupts = <4>, <3>;
 		};
 
 		wdt: watchdog@14e002d0 {
