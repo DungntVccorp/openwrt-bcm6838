@@ -1,0 +1,37 @@
+# BCM6838 RDP bring-up module, built against the OpenWrt kernel tree.
+# SDK points at a checkout of the Broadcom GPL SDK 416L05 sources; build.sh
+# links the SDK files listed in sdk-files.txt into sdk/.
+SDK ?= /home/builder/sdk416/sdk
+
+obj-m += bcm6838_rdp.o
+bcm6838_rdp-y := rdp_main.o rdp_net.o shared_utils_min.o pmc6838.o
+bcm6838_rdp-y += $(patsubst %.c,%.o,$(shell cat $(src)/sdk-objs.txt 2>/dev/null))
+
+ccflags-y += -DCONFIG_BCM96838 -D_BCM96838_ -D__OREN__ -DOREN -DRDD_BASIC -DLEGACY_RDP
+ccflags-y += -include $(src)/compat.h
+ccflags-y += -I$(src)
+ccflags-y += -I$(src)/shim
+ccflags-y += -I$(SDK)/shared/opensource/include/bcm963xx
+ccflags-y += -I$(SDK)/shared/opensource/include/pmc
+ccflags-y += -I$(SDK)/shared/opensource/include/rdp
+ccflags-y += -I$(SDK)/shared/opensource/include/rdp/base
+ccflags-y += -I$(SDK)/shared/opensource/include/drv/dpi
+ccflags-y += -I$(SDK)/shared/opensource/include/drv/unimac
+ccflags-y += -I$(SDK)/shared/opensource/include/drv/mdio
+ccflags-y += -I$(SDK)/shared/opensource/include/drv/phys
+ccflags-y += -I$(SDK)/shared/opensource/include/drv/phys/egphy
+ccflags-y += -I$(SDK)/shared/broadcom/rdp/impl1/rdd
+ccflags-y += -I$(SDK)/shared/broadcom/rdp/impl1/rdd/generated/oren
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/include/bcm963xx
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/rdpa_gpl/impl1/include
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/rdpa_gpl/impl1/include/autogen
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/bdmf/impl1/framework
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/bdmf/impl1/system
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/bdmf/impl1/system/linux
+ccflags-y += -I$(SDK)/bcmdrivers/opensource/char/bdmf/impl1/system/linux/ce
+ccflags-y += -Wno-error
+ccflags-y += -Wno-unused-variable -Wno-unused-function -Wno-missing-prototypes \
+	     -Wno-missing-declarations -Wno-implicit-fallthrough \
+	     -Wno-unused-but-set-variable -Wno-pointer-to-int-cast \
+	     -Wno-int-to-pointer-cast -Wno-address-of-packed-member \
+	     -Wno-array-bounds -Wno-stringop-overflow -Wno-format

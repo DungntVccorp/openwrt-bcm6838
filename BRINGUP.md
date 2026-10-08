@@ -1,7 +1,8 @@
 # BCM6838 / Mitrastar GPT-2541GNAC - initramfs bring-up notes
 
-Status (2026-10-07): OpenWrt 6.6 **initramfs boots to an interactive shell** over UART
-when loaded through CFE + TFTP. Ethernet is **not** working (no driver), single CPU only.
+Status (2026-10-08): OpenWrt 6.6 **initramfs boots to an interactive shell** over UART
+when loaded through CFE + TFTP. **Ethernet works** with the out-of-tree Runner module in
+`rdpdrv/` (see "Ethernet"), single CPU only.
 
 ## Build
 
@@ -71,31 +72,57 @@ After the fix `14e00500.serial` gets interrupts and the shell works.
 
 ## Known issues / TODO
 
-1. **CPU1 hang**: with SMP the log stops at `SMP: Booting CPU1...`. Workaround `maxcpus=1`.
-   Not investigated since the IRQ fix (the earlier IRQ misrouting may or may not be related);
-   retry without `maxcpus=1`.
+1. **CPU1 (TP1)** stays offline, `maxcpus=1` is kept.
+   * The CFE of this board leaves TP1 in reset (CP0 CMT control bit 0 `RSTSE` clear). The
+     mainline `bcm6368_quirks` -> `bcm63xx_fixup_cpu1()` assumes the 6368-style CFE that parks
+     TP1 at `0xa000_0200` and only sends it an IPI, which is what used to hang the boot.
+   * Tried: a 6838 quirk without that fixup, copying `bmips_reset_nmi_vec` to a reserved page
+     and pointing the "VIPER alternate boot vector" `PERF+0x2bc` (`AltBootConfig`, enable bit 19)
+     at it, then releasing TP1 with `RSTSE`. The kernel then reports `CPU1: failed to start`
+     instead of hanging, but breadcrumbs show TP1 never reaches the vector. Not committed.
 2. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.
-3. **Ethernet** - see below.
+3. **NAND**: kept disabled (see above).
 
-## Ethernet analysis (not implemented)
+## Ethernet (Runner) - working, out-of-tree module `rdpdrv/`
 
-Stock firmware prints `Broadcom BCM68380_B0 Ethernet Network Device`, 4 ports eth0-3,
-PHY ids `0x0180000x`, base MAC in CFE `p`.
+Status (2026-10-08): `eth0` up on the 4 LAN ports, LAN1 1000 Mb/s full duplex, ping to/from the
+PC without loss. `eth0` joins OpenWrt's `br-lan` (192.168.1.1).
 
-From the Broadcom GPL SDK 416L05 (`bcmdrivers/opensource/net/enet/impl5`,
-`shared/opensource/include/bcm963xx/6838_map_part.h`):
+The 6838 has no DMA path from the switch to the CPU: the LAN UniMACs (`0x130d4000`) feed the
+**Runner** network processor, which needs its microcode and DDR to forward packets to CPU rings.
+`rdpdrv/` compiles the Broadcom GPL SDK 416L05 code for that (like CFE does for its TFTP), with
+a small compatibility layer for Linux 6.6:
 
-* The 6838 builds `bcmenet` in **Runner/RDPA** mode (`bcmenet_runner.o`, `ethsw_runner.o`,
-  `bcmsw_runner.o`), not the plain DMA mode.
-* LAN ports sit on **UniMAC** blocks at `0x130d4000` (RDP), packets reach the CPU through the
-  Runner into CPU rings in RAM.
-* Other bases: PERF `0x14e00000`, TIMER `0x14e000c0`, GPIO `0x14e00100`, MDIO ext `0x14e00600`
-  (EGPHY `+0x10`), LED `0x14e00f00`, HS-SPI `0x14e01000`, NAND `0x14e02200`,
-  USB EHCI/OHCI `0x15400300/0x15400400`, PCIe0 `0x12800000`, PCIe1 `0x12a00000`.
-* The Runner microcode is published as C arrays (`shared/broadcom/rdp/impl1/firmware_oren/runner_fw_{a,b,c,d}.c`)
-  and the init code as source (`rdd_init.c`, `rdp_drv_{ih,bbh,bpm,sbpm}.c`, `rdp_cpu_ring.c`),
-  roughly 1-1.5 MB of code written for kernel 3.4.
+| Piece | Source |
+|---|---|
+| RDP power: release the 24 soft resets of PMB device 5 (`sr_control = 0xffffffff`) | `pmc6838.c` (PMC DQM mailbox, SDK `pmc/impl2` command table) |
+| Data path init: Runner microcode, IH, BPM, SBPM, BBH, DMA for EMAC0..3 | SDK `drv/dpi/oren_data_path_init.c`, `rdp/*.c`, `rdd/*.c` built with `RDD_BASIC LEGACY_RDP OREN __OREN__`, `firmware_oren/*` |
+| "Basic" forwarding: every CPU reason to CPU RX queue 0, unknown SA/DA to host | `f_initialize_basic_runner_parameters()` + `bridge_port_sa_da_cfg()` |
+| RX: 128-entry CPU ring 0 registered in the Runner ring table, NAPI polled from a timer | `rdp_net.c` |
+| TX: `rdd_cpu_tx_write_eth_packet()` to every EMAC with link | `rdp_net.c` |
+| PHY/MAC: `egphy_reset()` (quad EGPHY at MDIO 1..4), UniMAC init, speed/duplex from the PHY | SDK `drv/phys/egphy`, `drv/mdio`, `drv/unimac` |
 
-Options: (a) USB Ethernet dongle (EHCI/OHCI at `0x15400300` are in the stock log) - quickest;
-(b) port a minimal Runner init + one CPU ring + PHY, in stages: PMC/clock bring-up and UniMAC
-register read, Runner init, CPU ring + PHY, netdev + DHCP.
+Findings that matter:
+
+* After CFE the RDP block is powered (zone 0 on) but all its soft resets are asserted; reading
+  any RDP register before releasing them **hangs the bus** (watchdog reset ~25 s later).
+* The 6838 PMC firmware has no `cmdRevision` (returns error 15) and needs `cmdTuneRunner` (69),
+  which `rdd_init.c` calls.
+* Runner DDR: TM 0x06600000 (25 MB) and MC 0x06200000 (4 MB), both 2 MB aligned, reserved in the
+  DTS exactly like the stock kernel does.
+* CPU RX descriptor (16 bytes, big endian): `word0[13:0]` length, `[18:14]` source port,
+  `word2[31]` ownership (1 = host), `word2[28:0]` buffer address. Packet data starts at the
+  buffer start.
+
+Build (inside the OpenWrt build tree, SDK sources not included in this repo):
+
+```
+SDK=/path/to/broadcom-sdk-416L05 sh rdpdrv/build.sh     # links the files of sdk-files.txt
+insmod bcm6838_rdp.ko power_up=1 dp_init=1 net=1
+```
+
+The image also needs busybox `devmem` and `base64` for the bring-up helpers, and the
+`reserved-memory` node of the board DTS.
+
+TODO: Runner RX interrupt instead of polling, per-port netdevs (`lan1..4`) instead of
+flooding TX, package the module as a kmod loaded at boot.

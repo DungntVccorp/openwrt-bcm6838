@@ -11,6 +11,23 @@
 		reg = <0x00000000 0x08000000>;
 	};
 
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* Runner (RDP) multicast and traffic manager DDR, same as stock */
+		rdp_mc: rdp-mc@6200000 {
+			reg = <0x06200000 0x00400000>;
+			no-map;
+		};
+
+		rdp_tm: rdp-tm@6600000 {
+			reg = <0x06600000 0x01900000>;
+			no-map;
+		};
+	};
+
 #if 0
 	aliases {
 		led-boot = &led_power_green;

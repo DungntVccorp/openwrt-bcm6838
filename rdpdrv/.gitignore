@@ -1,0 +1,10 @@
+# build products and links created by build.sh
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+Module.symvers
+modules.order
+sdk/
+sdk-objs.txt
