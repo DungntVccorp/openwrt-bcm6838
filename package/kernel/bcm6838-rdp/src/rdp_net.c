@@ -4,8 +4,9 @@
  * basic Runner data path (all LAN traffic is trapped to CPU RX queue 0).
  *
  *  - RX: one CPU ring (ring 0) of 16-byte descriptors in uncached memory,
- *        registered in the Runner ring descriptor table; polled with NAPI
- *        from a timer, no Runner interrupt yet.
+ *        registered in the Runner ring descriptor table. NAPI is kicked by
+ *        Runner interrupt 0 / sub-interrupt 0 (L1 hwirq 16), with a slow
+ *        timer as a safety net; falls back to timer polling without IRQ.
  *  - TX: rdd_cpu_tx_write_eth_packet() to every LAN EMAC with link.
  *  - MAC/PHY: UniMAC 0..3 + the quad internal EGPHY at MDIO address 1..4.
  */
@@ -15,6 +16,9 @@
 #include <linux/netdevice.h>
 #include <linux/mii.h>
 #include <linux/timer.h>
+#include <linux/interrupt.h>
+#include <linux/of.h>
+#include <linux/of_irq.h>
 #include <asm/r4kcache.h>
 
 #include "rdd.h"
@@ -28,7 +32,10 @@
 #define RX_RING_SIZE		128
 #define RX_BUF_SIZE		2048
 #define RX_RING_ID		0	/* basic config maps every reason to queue 0 */
-#define POLL_INTERVAL		1	/* jiffies */
+#define POLL_INTERVAL		1	/* jiffies, when running without IRQ */
+#define RUNNER_IRQ_HWIRQ	16	/* BCM6838_IRQ_RDP_RUNNER, Runner int0 */
+#define RUNNER_INT		0	/* Runner interrupt 0 ... */
+#define RUNNER_SUB_INT		RX_RING_ID	/* ... sub-interrupt = ring id */
 
 /* CPU RX descriptor as seen by the (big endian) Runner */
 struct rdp_rx_desc {
@@ -51,6 +58,7 @@ struct rdp_priv {
 	unsigned int rx_head;
 
 	u32 link_map;
+	int irq;	/* 0: timer polling */
 };
 
 static struct rdp_priv *rdp;
@@ -58,6 +66,10 @@ static struct rdp_priv *rdp;
 static int rx_debug = 4;
 module_param(rx_debug, int, 0644);
 MODULE_PARM_DESC(rx_debug, "Number of received packets to dump");
+
+static bool rx_irq = true;
+module_param(rx_irq, bool, 0444);
+MODULE_PARM_DESC(rx_irq, "Use the Runner RX interrupt instead of timer polling");
 
 static char *macaddr = "a0:65:18:b6:3e:ee";
 module_param(macaddr, charp, 0444);
@@ -261,9 +273,11 @@ static int rdp_poll(struct napi_struct *napi, int budget)
 		done++;
 	}
 
-	if (done < budget) {
-		napi_complete_done(napi, done);
-		mod_timer(&p->poll_timer, jiffies + POLL_INTERVAL);
+	if (done < budget && napi_complete_done(napi, done)) {
+		if (p->irq)
+			rdd_interrupt_unmask(RUNNER_INT, RUNNER_SUB_INT);
+		mod_timer(&p->poll_timer,
+			  jiffies + (p->irq ? HZ : POLL_INTERVAL));
 	}
 	return done;
 }
@@ -273,6 +287,42 @@ static void rdp_poll_timer(struct timer_list *t)
 	struct rdp_priv *p = from_timer(p, t, poll_timer);
 
 	napi_schedule(&p->napi);
+}
+
+static irqreturn_t rdp_rx_isr(int irq, void *dev_id)
+{
+	struct rdp_priv *p = dev_id;
+
+	rdd_interrupt_mask(RUNNER_INT, RUNNER_SUB_INT);
+	rdd_interrupt_clear(RUNNER_INT, RUNNER_SUB_INT);
+	napi_schedule(&p->napi);
+	return IRQ_HANDLED;
+}
+
+/* map the Runner interrupt through the peripheral L1 controller */
+static int rdp_rx_irq_setup(struct rdp_priv *p)
+{
+	struct of_phandle_args args = { .args_count = 1,
+					.args = { RUNNER_IRQ_HWIRQ } };
+	int irq, ret;
+
+	args.np = of_find_compatible_node(NULL, NULL, "brcm,bcm6345-l1-intc");
+	if (!args.np)
+		return -ENODEV;
+	irq = irq_create_of_mapping(&args);
+	of_node_put(args.np);
+	if (!irq)
+		return -ENXIO;
+
+	rdd_interrupt_mask(RUNNER_INT, RUNNER_SUB_INT);
+	rdd_interrupt_clear(RUNNER_INT, RUNNER_SUB_INT);
+	ret = request_irq(irq, rdp_rx_isr, 0, "bcm6838-rdp", p);
+	if (ret) {
+		irq_dispose_mapping(irq);
+		return ret;
+	}
+	p->irq = irq;
+	return 0;
 }
 
 /* ------------------------------------------------------------------- TX */
@@ -313,6 +363,10 @@ static int rdp_open(struct net_device *ndev)
 	struct rdp_priv *p = netdev_priv(ndev);
 
 	napi_enable(&p->napi);
+	if (p->irq) {
+		rdd_interrupt_clear(RUNNER_INT, RUNNER_SUB_INT);
+		rdd_interrupt_unmask(RUNNER_INT, RUNNER_SUB_INT);
+	}
 	mod_timer(&p->poll_timer, jiffies + POLL_INTERVAL);
 	mod_timer(&p->link_timer, jiffies + HZ / 10);
 	netif_start_queue(ndev);
@@ -324,6 +378,8 @@ static int rdp_stop(struct net_device *ndev)
 	struct rdp_priv *p = netdev_priv(ndev);
 
 	netif_stop_queue(ndev);
+	if (p->irq)
+		rdd_interrupt_mask(RUNNER_INT, RUNNER_SUB_INT);
 	del_timer_sync(&p->link_timer);
 	del_timer_sync(&p->poll_timer);
 	napi_disable(&p->napi);
@@ -366,10 +422,17 @@ int rdp_net_init(void)
 	rdp_phy_mac_init();
 	netif_carrier_off(ndev);
 
+	if (rx_irq) {
+		ret = rdp_rx_irq_setup(rdp);
+		if (ret)
+			netdev_warn(ndev, "no Runner IRQ (%d), polling\n", ret);
+	}
+
 	ret = register_netdev(ndev);
 	if (ret)
 		goto err;
-	netdev_info(ndev, "BCM6838 Runner ethernet, MAC %pM\n", ndev->dev_addr);
+	netdev_info(ndev, "BCM6838 Runner ethernet, MAC %pM, %s\n",
+		    ndev->dev_addr, rdp->irq ? "Runner IRQ" : "timer polling");
 	return 0;
 
 err:
@@ -384,6 +447,8 @@ void rdp_net_exit(void)
 	if (!rdp)
 		return;
 	unregister_netdev(rdp->ndev);
+	if (rdp->irq)
+		free_irq(rdp->irq, rdp);
 	/* the Runner keeps the ring address, leave the buffers allocated */
 	free_netdev(rdp->ndev);
 	rdp = NULL;

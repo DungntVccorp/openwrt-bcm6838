@@ -1,0 +1,76 @@
+From: DungntVccorp <12063658+DungntVccorp@users.noreply.github.com>
+Subject: [PATCH] MIPS: BMIPS: bcm6838: boot CPU1 without wiping the shared I-cache
+
+On the BCM6838 the CFE parks TP1 like on the BCM6368 family, so
+bcm63xx_fixup_cpu1() works, but both threads share the L1 I-cache
+(BRCM config0 ICSHEN set) and TP0 has already set it up. The
+Index_Store_Tag_I loop that bmips_smp_entry runs on CPU1 wipes the tags
+under TP0 and the whole core hangs as soon as CPU1 fetches through the
+cache (right after the jump to KSEG0), so the boot stopped at
+"SMP: Booting CPU1...".
+
+Add a flag to skip that loop and set it from a BCM6838 quirk.
+
+--- a/arch/mips/bmips/setup.c
++++ b/arch/mips/bmips/setup.c
+@@ -196,6 +196,13 @@
+ 	bcm63xx_fixup_cpu1();
+ }
+ 
++static void bcm6838_quirks(void)
++{
++	/* both threads share the I-cache, TP0 already initialized it */
++	bmips_cpu1_skip_icache_init = 1;
++	bcm63xx_fixup_cpu1();
++}
++
+ static const struct bmips_quirk bmips_quirk_list[] = {
+ 	{ "brcm,bcm3368",		&bcm6358_quirks			},
+ 	{ "brcm,bcm3384-viper",		&bcm3384_viper_quirks		},
+@@ -204,7 +211,7 @@
+ 	{ "brcm,bcm6358",		&bcm6358_quirks			},
+ 	{ "brcm,bcm6362",		&bcm6368_quirks			},
+ 	{ "brcm,bcm6368",		&bcm6368_quirks			},
+-	{ "brcm,bcm6838",		&bcm6368_quirks			},
++	{ "brcm,bcm6838",		&bcm6838_quirks			},
+ 	{ "brcm,bcm63168",		&bcm6368_quirks			},
+ 	{ "brcm,bcm63268",		&bcm6368_quirks			},
+ 	{ },
+--- a/arch/mips/include/asm/bmips.h
++++ b/arch/mips/include/asm/bmips.h
+@@ -76,6 +76,7 @@
+ }
+ 
+ extern char bmips_reset_nmi_vec[];
++extern int bmips_cpu1_skip_icache_init;
+ extern char bmips_reset_nmi_vec_end[];
+ extern char bmips_smp_movevec[];
+ extern char bmips_smp_int_vec[];
+--- a/arch/mips/kernel/bmips_vec.S
++++ b/arch/mips/kernel/bmips_vec.S
+@@ -187,6 +187,15 @@
+ 	li	k1, PRID_IMP_BMIPS43XX
+ 	bne	k0, k1, 2f
+ 
++	/*
++	 * Some SoCs (BCM6838) share the I-cache between both threads and
++	 * TP0 has already set it up: wiping the tags under its feet hangs
++	 * the core as soon as CPU1 fetches through the cache.
++	 */
++	la	k0, bmips_cpu1_skip_icache_init
++	lw	k0, 0(k0)
++	bnez	k0, 3f
++
+ 	/* initialize CPU1's local I-cache */
+ 	li	k0, 0x80000000
+ 	li	k1, 0x80010000
+--- a/arch/mips/kernel/smp-bmips.c
++++ b/arch/mips/kernel/smp-bmips.c
+@@ -43,6 +43,7 @@
+ 
+ /* these may be configured by the platform code */
+ int bmips_smp_enabled = 1;
++int bmips_cpu1_skip_icache_init;
+ int bmips_cpu_offset;
+ cpumask_t bmips_booted_mask;
+ unsigned long bmips_tp1_irqs = IE_IRQ1;

@@ -2,7 +2,7 @@
 
 Status (2026-10-08): OpenWrt 6.6 **initramfs boots to an interactive shell** over UART
 when loaded through CFE + TFTP. **Ethernet works** with the Runner driver package
-`kmod-bcm6838-rdp` (see "Ethernet"), single CPU only.
+`kmod-bcm6838-rdp` (see "Ethernet"). Both hardware threads run (SMP, 2 CPUs).
 
 ## Build
 
@@ -45,7 +45,7 @@ container). `git archive` with `core.autocrlf=true` converts scripts to CRLF and
 |---|---|
 | RAM `0x08000000` (128 MB) instead of 256 MB | Board has 128 MB. The stock kernel reserves 4 MB (MC) + 25 MB (TM) for the Runner. |
 | `&nflash` disabled | brcmnand polls forever (no IRQ at that time) and, with `nand-on-flash-bbt`, may rewrite the bad-block table of the stock firmware. Not needed for initramfs. |
-| `bootargs = "earlycon console=ttyS0,115200 maxcpus=1"` | console on UART0; CPU1 bring-up hangs (see below). |
+| `bootargs = "earlycon console=ttyS0,115200"` | console on UART0 (`maxcpus=1` no longer needed, see "CPU1"). |
 | `periph_intc` register pairs / parent IRQs swapped | See "Interrupt routing". |
 
 ### Interrupt routing (the important finding)
@@ -72,16 +72,31 @@ After the fix `14e00500.serial` gets interrupts and the shell works.
 
 ## Known issues / TODO
 
-1. **CPU1 (TP1)** stays offline, `maxcpus=1` is kept.
-   * The CFE of this board leaves TP1 in reset (CP0 CMT control bit 0 `RSTSE` clear). The
-     mainline `bcm6368_quirks` -> `bcm63xx_fixup_cpu1()` assumes the 6368-style CFE that parks
-     TP1 at `0xa000_0200` and only sends it an IPI, which is what used to hang the boot.
-   * Tried: a 6838 quirk without that fixup, copying `bmips_reset_nmi_vec` to a reserved page
-     and pointing the "VIPER alternate boot vector" `PERF+0x2bc` (`AltBootConfig`, enable bit 19)
-     at it, then releasing TP1 with `RSTSE`. The kernel then reports `CPU1: failed to start`
-     instead of hanging, but breadcrumbs show TP1 never reaches the vector. Not committed.
-2. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.
-3. **NAND**: kept disabled (see above).
+1. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.
+2. **NAND**: kept disabled (see above).
+
+## CPU1 (TP1) - fixed, patch `902-bcm6838-boot-cpu1-with-shared-icache.patch`
+
+The CFE parks TP1 like on the BCM6368 family, so the upstream `bcm63xx_fixup_cpu1()` path is
+right: TP1 runs `bmips_smp_movevec`, sets its own relocated reset vector (`CBR+0x38000`,
+`MIPS_TP1_ALT_BV` in the SDK, value `0xa0080000`) and waits for the boot IPI.
+
+The hang at `SMP: Booting CPU1...` came from `bmips_smp_entry`: it wipes the I-cache tags
+(`Index_Store_Tag_I` over 64 KB) before CPU1 runs cached code. On the 6838 both threads
+**share** the L1 I-cache (BRCM config0 `0xe31f1406`, ICSHEN/DCSHEN set) and TP0 already
+initialized it; the whole core freezes on CPU1's first cached fetch.
+
+Found by single-stepping TP1 from TP0 (TP1 publishes a stage number in uncached RAM and waits,
+TP0 prints it, hardware watchdog armed to recover): TP1 reached the jump to KSEG0 and never the
+next instruction; skipping the wipe let it boot. The patch adds `bmips_cpu1_skip_icache_init`
+and a `bcm6838_quirks()` that sets it before `bcm63xx_fixup_cpu1()`.
+
+Tested: 2 CPUs, IPIs both ways, per-CPU timer, peripheral IRQs (UART, Runner) delivered on CPU1
+through the TP1 L1 mask (IP3), both CPUs at 100% load while pinging without loss.
+
+Dead ends on the way, for the record: PERF `AltBootConfig` (`0x14e002bc`) and releasing TP1
+with CMT `RSTSE` (TP1 is not in reset, it is parked in CFE), copying config0/CBR to TP1.
+
 
 ## Ethernet (Runner) - working, package `kmod-bcm6838-rdp`
 
@@ -98,7 +113,7 @@ a small compatibility layer for Linux 6.6:
 | RDP power: release the 24 soft resets of PMB device 5 (`sr_control = 0xffffffff`) | `pmc6838.c` (PMC DQM mailbox, SDK `pmc/impl2` command table) |
 | Data path init: Runner microcode, IH, BPM, SBPM, BBH, DMA for EMAC0..3 | SDK `drv/dpi/oren_data_path_init.c`, `rdp/*.c`, `rdd/*.c` built with `RDD_BASIC LEGACY_RDP OREN __OREN__`, `firmware_oren/*` |
 | "Basic" forwarding: every CPU reason to CPU RX queue 0, unknown SA/DA to host | `f_initialize_basic_runner_parameters()` + `bridge_port_sa_da_cfg()` |
-| RX: 128-entry CPU ring 0 registered in the Runner ring table, NAPI polled from a timer | `rdp_net.c` |
+| RX: 128-entry CPU ring 0 registered in the Runner ring table, NAPI kicked by Runner interrupt 0 / sub-interrupt 0 (L1 hwirq 16, `rdd_interrupt_mask/clear/unmask`), 1 s safety timer; `rx_irq=0` falls back to timer polling | `rdp_net.c` |
 | TX: `rdd_cpu_tx_write_eth_packet()` to every EMAC with link | `rdp_net.c` |
 | PHY/MAC: `egphy_reset()` (quad EGPHY at MDIO 1..4), UniMAC init, speed/duplex from the PHY | SDK `drv/phys/egphy`, `drv/mdio`, `drv/unimac` |
 
@@ -124,5 +139,6 @@ The image needs the `reserved-memory` node of the board DTS (Runner DDR).
 
 Also tested: `udhcpc -i eth0` gets a lease (DISCOVER/OFFER/REQUEST/ACK).
 
-TODO: Runner RX interrupt instead of polling, per-port netdevs (`lan1..4`) instead of
-flooding TX.
+Known limitation (not needed for the single-cable use case, left as is): there is one `eth0`
+for the four LAN ports and TX is sent out of every port that has link (no per-port
+`lan1..4` netdevs / DSA tagging). With one cable connected this is invisible.
