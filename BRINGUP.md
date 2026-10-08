@@ -1,8 +1,8 @@
 # BCM6838 / Mitrastar GPT-2541GNAC - initramfs bring-up notes
 
 Status (2026-10-08): OpenWrt 6.6 **initramfs boots to an interactive shell** over UART
-when loaded through CFE + TFTP. **Ethernet works** with the out-of-tree Runner module in
-`rdpdrv/` (see "Ethernet"), single CPU only.
+when loaded through CFE + TFTP. **Ethernet works** with the Runner driver package
+`kmod-bcm6838-rdp` (see "Ethernet"), single CPU only.
 
 ## Build
 
@@ -83,14 +83,14 @@ After the fix `14e00500.serial` gets interrupts and the shell works.
 2. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.
 3. **NAND**: kept disabled (see above).
 
-## Ethernet (Runner) - working, out-of-tree module `rdpdrv/`
+## Ethernet (Runner) - working, package `kmod-bcm6838-rdp`
 
 Status (2026-10-08): `eth0` up on the 4 LAN ports, LAN1 1000 Mb/s full duplex, ping to/from the
 PC without loss. `eth0` joins OpenWrt's `br-lan` (192.168.1.1).
 
 The 6838 has no DMA path from the switch to the CPU: the LAN UniMACs (`0x130d4000`) feed the
 **Runner** network processor, which needs its microcode and DDR to forward packets to CPU rings.
-`rdpdrv/` compiles the Broadcom GPL SDK 416L05 code for that (like CFE does for its TFTP), with
+`package/kernel/bcm6838-rdp` compiles the Broadcom GPL SDK 416L05 code for that (like CFE does for its TFTP), with
 a small compatibility layer for Linux 6.6:
 
 | Piece | Source |
@@ -114,15 +114,15 @@ Findings that matter:
   `word2[31]` ownership (1 = host), `word2[28:0]` buffer address. Packet data starts at the
   buffer start.
 
-Build (inside the OpenWrt build tree, SDK sources not included in this repo):
+Build: the package downloads the SDK tarball (`broadcom_sdk_416L05_pkg.tar.bz2`, checked by
+SHA256), links the files of `src/sdk-files.txt` and builds `bcm6838_rdp.ko`. The device selects it
+(`DEVICE_PACKAGES`), and it autoloads at boot with every stage enabled. For bring-up the stages
+can be turned off with module parameters (`power_up=0`, `dp_init=0`, `net=0`, `probe=1`).
+`src/build.sh` builds the same module outside the package against a built kernel tree.
 
-```
-SDK=/path/to/broadcom-sdk-416L05 sh rdpdrv/build.sh     # links the files of sdk-files.txt
-insmod bcm6838_rdp.ko power_up=1 dp_init=1 net=1
-```
+The image needs the `reserved-memory` node of the board DTS (Runner DDR).
 
-The image also needs busybox `devmem` and `base64` for the bring-up helpers, and the
-`reserved-memory` node of the board DTS.
+Also tested: `udhcpc -i eth0` gets a lease (DISCOVER/OFFER/REQUEST/ACK).
 
 TODO: Runner RX interrupt instead of polling, per-port netdevs (`lan1..4`) instead of
-flooding TX, package the module as a kmod loaded at boot.
+flooding TX.

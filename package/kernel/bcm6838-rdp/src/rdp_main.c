@@ -2,13 +2,12 @@
 /*
  * BCM6838 RDP (Runner) bring-up.
  *
- * Loads in stages controlled by module parameters so that nothing touches
- * an unpowered RDP register (that hangs the UBUS):
- *   insmod bcm6838_rdp.ko                         read-only PMC / RDP status
- *   insmod bcm6838_rdp.ko power_up=1              release the RDP soft resets
- *   insmod bcm6838_rdp.ko power_up=1 probe=1      also read UniMAC registers
- *   insmod bcm6838_rdp.ko power_up=1 dp_init=1    data_path_init() + go
- *   insmod bcm6838_rdp.ko power_up=1 dp_init=1 net=1   also register eth0
+ * Everything is enabled by default (kmod autoload). For bring-up the
+ * stages can be switched off, nothing touches an RDP register before the
+ * soft resets are released (that hangs the UBUS):
+ *   insmod bcm6838_rdp.ko power_up=0               read-only PMC / RDP status
+ *   insmod bcm6838_rdp.ko dp_init=0 probe=1        reset release + UniMAC read
+ *   insmod bcm6838_rdp.ko net=0                    data_path_init() + go only
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -25,7 +24,7 @@
 /* implemented in pmc6838.c */
 int Ping(void);
 
-static bool power_up;
+static bool power_up = true;
 module_param(power_up, bool, 0444);
 MODULE_PARM_DESC(power_up, "Release the RDP block soft resets via the PMC");
 
@@ -33,11 +32,11 @@ static bool probe;
 module_param(probe, bool, 0444);
 MODULE_PARM_DESC(probe, "Read UniMAC registers after a successful power up");
 
-static bool dp_init;
+static bool dp_init = true;
 module_param(dp_init, bool, 0444);
 MODULE_PARM_DESC(dp_init, "Run the SDK data_path_init()/data_path_go()");
 
-static bool net;
+static bool net = true;
 module_param(net, bool, 0444);
 MODULE_PARM_DESC(net, "Register eth0 on top of the data path");
 

@@ -13,7 +13,7 @@ define Device/mitrastar_gpt-2541gnac
   SUBPAGESIZE := 512
   VID_HDR_OFFSET := 2048
   DEVICE_PACKAGES += $(USB2_PACKAGES) \
-    kmod-leds-bcm6328
+    kmod-leds-bcm6328 kmod-bcm6838-rdp
   IMAGES :=
 endef
 TARGET_DEVICES += mitrastar_gpt-2541gnac
