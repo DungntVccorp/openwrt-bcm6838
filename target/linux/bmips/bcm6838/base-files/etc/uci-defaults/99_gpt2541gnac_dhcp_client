@@ -1,0 +1,27 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# The GPT-2541GNAC is used as a host behind another router: it gets its
+# addresses by DHCP/DHCPv6 on lan (see board.d/02_network) and must not
+# serve DHCP or router advertisements there.
+
+. /lib/functions.sh
+
+case "$(board_name)" in
+mitrastar,gpt-2541gnac)
+	uci -q batch <<-EOT
+		set dhcp.lan.ignore='1'
+		set dhcp.lan.dhcpv6='disabled'
+		set dhcp.lan.ra='disabled'
+		set network.lan6=interface
+		set network.lan6.device='@lan'
+		set network.lan6.proto='dhcpv6'
+		del_list firewall.@zone[0].network='lan6'
+		add_list firewall.@zone[0].network='lan6'
+		set system.@system[0].hostname='GPT-2541GNAC'
+		commit
+	EOT
+	;;
+esac
+
+exit 0

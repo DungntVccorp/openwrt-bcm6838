@@ -70,6 +70,28 @@ The previous DTS had them the other way round. Fixed with
 `reg = <0x14e00048..>, <0x14e00040..>, <0x14e00350..>, <0x14e00348..>; interrupts = <4>, <3>;`.
 After the fix `14e00500.serial` gets interrupts and the shell works.
 
+## Default network role: host behind another router
+
+The GPT-2541GNAC image is meant to sit on an existing LAN like a PC:
+
+* `board.d/02_network`: `lan` = `eth0` (bridged as `br-lan`) with `proto dhcp`.
+* `uci-defaults/99_gpt2541gnac_dhcp_client`: no DHCPv4/DHCPv6/RA service on `lan`
+  (`dhcp.lan.ignore=1`), `lan6` = DHCPv6 client in the `lan` firewall zone, hostname
+  `GPT-2541GNAC` (easy to spot in the upstream router's lease list).
+
+There is no fixed address any more: find it in the upstream router's DHCP leases (or on the
+serial console). Tested with a test DHCP server: lease, default route and DNS taken from it.
+
+SSH keys are not part of the repository. For a local build, drop them in the build tree's
+`files/` overlay:
+
+```
+files/etc/dropbear/authorized_keys          (mode 600)
+files/etc/uci-defaults/98_dropbear_key_only (PasswordAuth/RootPasswordAuth off)
+```
+
+Without that, root has no password and SSH accepts anyone on the LAN: set one with `passwd`.
+
 ## Known issues / TODO
 
 1. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.

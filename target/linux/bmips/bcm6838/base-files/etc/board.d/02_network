@@ -5,6 +5,10 @@
 board_config_update
 
 case "$(board_name)" in
+mitrastar,gpt-2541gnac)
+	# used as a host behind another router: LAN is a DHCP client
+	ucidef_set_interface_lan "eth0" "dhcp"
+	;;
 brand,model)
 	ucidef_set_bridge_device switch
 	ucidef_set_interface_lan "lan1 lan2 lan3 lan4"
