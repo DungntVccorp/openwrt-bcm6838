@@ -95,24 +95,62 @@
 };
 
 &nflash {
-	status = "disabled";
+	status = "okay";
 
 	nandcs@0 {
 		compatible = "brcm,nandcs";
 		reg = <0>;
 		nand-ecc-step-size = <512>;
 		nand-ecc-strength = <4>;
-		nand-on-flash-bbt;
-		brcm,nand-oob-sector-size = <64>;
+		/* stock CFE: 16 OOB bytes per 512 byte step, BCH-4 */
+		brcm,nand-oob-sector-size = <16>;
+		/*
+		 * No nand-on-flash-bbt: the CFE keeps its own BBT in the last
+		 * blocks, Linux only reads the bad block markers.
+		 */
 
 		partitions {
 			compatible = "fixed-partitions";
 			#address-cells = <1>;
 			#size-cells = <1>;
 
+			/*
+			 * Broadcom dual image layout. OpenWrt lives in image A
+			 * (the stock "image_update" slot), the stock firmware
+			 * stays in image B as a fallback.
+			 */
 			partition@0 {
-				label = "storage";
-				reg = <0 0>; /* autodetected size */
+				label = "cfe";
+				reg = <0x0000000 0x0020000>;
+				read-only;
+			};
+
+			/* JFFS2 with cferam + vmlinux.lz4, "BcmFs-ubifs" marker at the end */
+			partition@20000 {
+				label = "bootfs";
+				reg = <0x0020000 0x0600000>;
+			};
+
+			partition@620000 {
+				label = "ubi";
+				reg = <0x0620000 0x3760000>;
+			};
+
+			partition@3d80000 {
+				label = "stock_bootfs";
+				reg = <0x3d80000 0x0520000>;
+				read-only;
+			};
+
+			partition@42a0000 {
+				label = "stock_rootfs";
+				reg = <0x42a0000 0x3840000>;
+				read-only;
+			};
+
+			partition@7b00000 {
+				label = "stock_data";
+				reg = <0x7b00000 0x0400000>;
 				read-only;
 			};
 		};

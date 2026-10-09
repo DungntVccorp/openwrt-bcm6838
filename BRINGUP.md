@@ -95,7 +95,89 @@ Without that, root has no password and SSH accepts anyone on the LAN: set one wi
 ## Known issues / TODO
 
 1. **PCIe** (`bcm6318-pcie` probe -2) and **hsspi** (probe -2): not supported yet.
-2. **NAND**: kept disabled (see above).
+2. **NAND install**: working, see "Installing to NAND" below. `sysupgrade` is not implemented for
+   this layout yet: updates are done by hand (also below).
+
+## Installing to NAND (dual image, OpenWrt in slot A)
+
+Status (2026-10-09): OpenWrt boots from the NAND by itself (CFE -> `cferam.036` -> kernel -> UBI
+squashfs + UBIFS overlay), 2 CPUs, `eth0` + DHCP. The stock firmware stays untouched in slot B.
+
+**Back up first.** The whole NAND (with and without OOB) can be dumped from a running system by
+enabling the DT-disabled controller; the DTS now has it `okay`. Keep `nand_ecc.bin`: every range
+written below was compared with it before the first erase.
+
+Broadcom layout of the 128 MB Spansion S34ML01G1 (page 2 KiB, 128 KiB blocks, BCH-4 with 16 OOB
+bytes per 512 B, CFE keeps its own BBT in the last blocks):
+
+| Range | Content | In the DTS |
+|---|---|---|
+| `0x0000000-0x0020000` | CFE ROM + NVRAM | `cfe`, read-only. **Never write.** |
+| `0x0020000-0x0620000` | slot A bootfs (JFFS2 with `cferam.NNN` + kernel) | `bootfs` |
+| `0x0620000-0x3d80000` | slot A rootfs (UBI) | `ubi` (auto-attached by OpenWrt) |
+| `0x3d80000-0x42a0000` | slot B bootfs (stock) | `stock_bootfs`, read-only |
+| `0x42a0000-0x7ae0000` | slot B rootfs (stock) | `stock_rootfs`, read-only |
+| `0x7b00000-0x7f00000` | stock `data` | `stock_data`, read-only (renamed: patch 490 would auto-attach "data") |
+| last 1 MB | CFE BBT | not mapped |
+
+How CFE boots (from the CFE blob and the stock images):
+
+* It mounts both bootfs JFFS2 partitions, which must end with the 256 byte marker
+  `BcmFs-ubifs` + NUL byte, repeated 4 times, and boots the slot with the **highest `cferam.NNN`** (stock is `.035`, we
+  use `.036`). Boot image `1` ("previous") in the CFE settings flips to the other slot: that is the
+  way back to the stock firmware.
+* `cferam` (the second stage) is byte for byte the stock one; it only accepts JFFS2 dirents with
+  version > 0, so a dummy file `1-openwrt` goes first.
+* The kernel is `vmlinux.lz4`: 20 byte big-endian header (load, entry, compressed length, `BRCM`,
+  uncompressed length) and **one raw LZ4 block**. The stock kernel is not signed and CFE does not
+  check it (the signature path only exists for the name `vmlinux.lz`, not used here).
+* CFE and its own buffers occupy about `0x80a00000-0x82880000`, so a 10.8 MB kernel cannot be
+  loaded at `0x80010000`. We pack OpenWrt's `relocate` loader + kernel + DTB with load/entry
+  `0x83000000`; the loader copies the kernel down to `0x80010000`.
+
+Images (`target/linux/bmips/bcm6838/nand-install/`): `mkslot.sh <stock cferam> 036` builds
+`bootfs.bin` (6 MiB) and `ubi.bin` from a finished build (`brcmlz4.c` is the packer, needs the LZ4
+sources; `jffs2x.py` and `brcm_lz4.py` check the result).
+
+Writing slot A from a running system (the initramfs, never from the slot being written):
+
+1. Boot into a system with the NAND DT enabled. Load `slota.ko` (`nand-install/slota.c`): it adds
+   exactly two writable partitions, `slota_bootfs` and `slota_ubi`, on top of the read-only
+   whole-chip device, so no other range can be touched.
+2. Compare both ranges with the backup (md5), then write **UBI first, bootfs last**:
+   `ubiformat /dev/mtdY -f ubi.bin -y`, test `ubiattach -m Y` (no `-O`), then
+   `flash_erase /dev/mtdX 0 0 && nandwrite -p /dev/mtdX bootfs.bin`, read back and compare md5.
+   The new `cferam` is the switch that makes CFE choose slot A.
+3. Reboot. Check that CFE, cferam, kernel and UBI come up from serial.
+
+Findings:
+
+* `brcm,nand-oob-sector-size` must be `<16>` (the old DTS had 64). Controller values after CFE:
+  ACC `0xe3441010`, CFG `0x15142200`. No `nand-on-flash-bbt`: Linux must not write a BBT over
+  CFE's.
+* Writes are page by page with ECC and read back exactly (md5 of the 6 MB bootfs and the UBI tail),
+  0 bad blocks, 0 corrected bits in slot A.
+* Do not leave a serial console typing at the CFE prompt while it autoboots: any key stops auto run.
+
+### Runner needs more setup when CFE boots from flash
+
+When the kernel comes from the TFTP command the CFE has just run its own network stack and left the
+RDP block fully configured. Booting from flash skips that, and the first NAND boots had TX working
+but **no RX at all** (`rx_packets 0`, DHCP never answered). `rdp_pre_init()`/`rdp_post_init()` of the
+SDK (`bcm_misc_hw_init_impl3.c`) do more than releasing the soft resets, now done in `rdp_main.c` /
+`rdp_net.c`:
+
+* enable the three RDP UBUS masters (`0xb30d2000/2400/2800` bit 0) and the urgent->high priority
+  forwarding of master 3 (`0xb30d280c |= 0xf0e01`);
+* PMB `CHIP_CLKRST` registers `0xE = 0x33`, `0xF = 0xff`;
+* the header-hold workaround `0xb200088c = 0x33`;
+* `mac_hwapi_set_unimac_cfg()` (`gmii_direct`) for each EMAC.
+
+With those in place RX works straight from a NAND boot.
+
+Module load order: `kmod-bcm6838-rdp` used to be loaded from `/etc/modules-boot.d` at preinit, which
+is before the overlay is mounted. That is fine for an image build; when testing a new `.ko` from the
+overlay, remove the `modules-boot.d` symlink so it loads from `modules.d` instead.
 
 ## CPU1 (TP1) - fixed, patch `902-bcm6838-boot-cpu1-with-shared-icache.patch`
 

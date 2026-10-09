@@ -24,6 +24,8 @@
 /* implemented in pmc6838.c */
 int Ping(void);
 
+static void rdp_ubus_pre_init(void);
+
 static bool power_up = true;
 module_param(power_up, bool, 0444);
 MODULE_PARM_DESC(power_up, "Release the RDP block soft resets via the PMC");
@@ -78,8 +80,41 @@ static int rdp_power_up(void)
 	ret = PowerOnDevice(PMB_ADDR_RDP);
 	if (ret)
 		return ret;
-	return WriteBPCMRegister(PMB_ADDR_RDP, BPCMRegOffset(sr_control),
-				 0xffffffff);
+	ret = WriteBPCMRegister(PMB_ADDR_RDP, BPCMRegOffset(sr_control),
+				0xffffffff);
+	if (!ret)
+		rdp_ubus_pre_init();
+	return ret;
+}
+
+/*
+ * What CFE's rdp_pre_init() does after releasing the resets and what it
+ * leaves behind when it boots a kernel from flash without bringing up its own
+ * network: UBUS masters, PMB clock/reset block and the header-hold workaround.
+ */
+#define RDP_UBUS_MASTER1_EN	0xb30d2000
+#define RDP_UBUS_MASTER2_EN	0xb30d2400
+#define RDP_UBUS_MASTER3_EN	0xb30d2800
+#define RDP_UBUS_MASTER3_HP	0xb30d280c
+
+static void rdp_ubus_pre_init(void)
+{
+	void __iomem *en[] = { (void __iomem *)RDP_UBUS_MASTER1_EN,
+			       (void __iomem *)RDP_UBUS_MASTER2_EN,
+			       (void __iomem *)RDP_UBUS_MASTER3_EN };
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(en); i++)
+		__raw_writel(__raw_readl(en[i]) | 1, en[i]);
+	__raw_writel(__raw_readl((void __iomem *)RDP_UBUS_MASTER3_HP) | 0xf0e01,
+		     (void __iomem *)RDP_UBUS_MASTER3_HP);
+
+	ret = WriteBPCMRegister(PMB_ADDR_CHIP_CLKRST, 0xE, 0x33);
+	ret |= WriteBPCMRegister(PMB_ADDR_CHIP_CLKRST, 0xF, 0xFF);
+	pr_info("rdp: UBUS masters enabled, CLKRST ret=%d\n", ret);
+
+	/* JIRA SWBCACPE-14083 workaround from the SDK */
+	__raw_writel(0x33, (void __iomem *)0xb200088c);
 }
 
 static int rdp_data_path_start(void)

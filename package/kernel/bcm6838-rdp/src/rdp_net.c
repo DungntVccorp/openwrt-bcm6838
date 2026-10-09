@@ -102,6 +102,7 @@ static void rdp_phy_mac_init(void)
 		rdp_phy_write(e, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 
 		mac_hwapi_init_emac(e);
+		mac_hwapi_set_unimac_cfg(e);	/* gmii_direct, like rdp_post_init() */
 		mac_hwapi_set_rxtx_enable(e, 1, 1);
 	}
 }
