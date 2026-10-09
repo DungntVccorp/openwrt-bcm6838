@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # A unit that still carries the factory CFE NVRAM has the placeholder base MAC
-# 02:10:18:01:00:01, shared by every unit in that state. Give lan a random
-# (locally administered, unicast) MAC once, kept in the configuration, so two
-# such units do not clash on one network.
+# 02:10:18:01:00:01, shared by every unit in that state. Give the lan bridge a
+# random (locally administered, unicast) MAC once, kept in the configuration,
+# so two such units do not clash on one network. The address has to be set on
+# the bridge device section: macaddr on the interface does not reach it.
 
 DEFAULT_MAC="02:10:18:01:00:01"
 
@@ -13,9 +14,14 @@ DEFAULT_MAC="02:10:18:01:00:01"
 RAND="$(dd if=/dev/urandom bs=1 count=5 2>/dev/null | hexdump -v -e '/1 ":%02x"')"
 MAC="02$RAND"
 
-uci -q batch <<-EOT
-	set network.lan.macaddr='$MAC'
-	commit network
-EOT
+idx=0
+while uci -q get network.@device[$idx] >/dev/null; do
+	if [ "$(uci -q get network.@device[$idx].name)" = "br-lan" ]; then
+		uci set network.@device[$idx].macaddr="$MAC"
+		uci commit network
+		break
+	fi
+	idx=$((idx + 1))
+done
 
 exit 0

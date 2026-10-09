@@ -287,8 +287,9 @@ readable, e.g. with the NAND disabled in the DTS. Every unit therefore keeps its
 
 Units that still have the factory NVRAM (base MAC `02:10:18:01:00:01`, GPON SN `BRCM12345678`)
 would all share that placeholder MAC. `uci-defaults/97_bcm6838_default_mac` notices it at the first
-boot and stores a random locally administered unicast MAC in `network.lan.macaddr`, so `br-lan`
-gets its own address and keeps it across reboots (`eth0` itself keeps the NVRAM MAC).
+boot and stores a random locally administered unicast MAC in the `macaddr` of the `br-lan` device
+section (`macaddr` on the `lan` interface does not reach the bridge), so `br-lan` gets its own address
+and keeps it across reboots (`eth0` itself keeps the NVRAM MAC).
 
 Known limitation (not needed for the single-cable use case, left as is): there is one `eth0`
 for the four LAN ports and TX is sent out of every port that has link (no per-port
