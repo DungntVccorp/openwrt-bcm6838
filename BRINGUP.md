@@ -175,9 +175,13 @@ SDK (`bcm_misc_hw_init_impl3.c`) do more than releasing the soft resets, now don
 
 With those in place RX works straight from a NAND boot.
 
-Module load order: `kmod-bcm6838-rdp` used to be loaded from `/etc/modules-boot.d` at preinit, which
-is before the overlay is mounted. That is fine for an image build; when testing a new `.ko` from the
-overlay, remove the `modules-boot.d` symlink so it loads from `modules.d` instead.
+Module load order: `kmod-bcm6838-rdp` is loaded at preinit from `/etc/modules-boot.d`, i.e. from
+the read-only squashfs, **before the overlay is mounted**. A newer `.ko` copied to the overlay is
+therefore ignored at that stage, and removing the `modules-boot.d` symlink on the overlay does not
+help either (the rom one is the one seen at preinit). To test a module without reflashing the
+rootfs, keep the new `.ko` in the overlay and add an init script that runs before `network`
+(`START=10`) and does `rmmod bcm6838_rdp; insmod <overlay .ko>` when it differs from the one in
+`/rom`. For a real install rebuild the image so the squashfs carries the fixed module.
 
 ## CPU1 (TP1) - fixed, patch `902-bcm6838-boot-cpu1-with-shared-icache.patch`
 
