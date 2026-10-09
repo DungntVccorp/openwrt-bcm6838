@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# A unit that still carries the factory CFE NVRAM has the placeholder base MAC
+# 02:10:18:01:00:01, shared by every unit in that state. Give lan a random
+# (locally administered, unicast) MAC once, kept in the configuration, so two
+# such units do not clash on one network.
+
+DEFAULT_MAC="02:10:18:01:00:01"
+
+[ "$(cat /sys/class/net/eth0/address 2>/dev/null)" = "$DEFAULT_MAC" ] || exit 0
+
+RAND="$(dd if=/dev/urandom bs=1 count=5 2>/dev/null | hexdump -v -e '/1 ":%02x"')"
+MAC="02$RAND"
+
+uci -q batch <<-EOT
+	set network.lan.macaddr='$MAC'
+	commit network
+EOT
+
+exit 0
