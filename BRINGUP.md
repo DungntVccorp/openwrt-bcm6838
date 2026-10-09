@@ -101,7 +101,9 @@ Without that, root has no password and SSH accepts anyone on the LAN: set one wi
 ## Installing to NAND (dual image, OpenWrt in slot A)
 
 Status (2026-10-09): OpenWrt boots from the NAND by itself (CFE -> `cferam.036` -> kernel -> UBI
-squashfs + UBIFS overlay), 2 CPUs, `eth0` + DHCP. The stock firmware stays untouched in slot B.
+squashfs + UBIFS overlay), 2 CPUs, `eth0` + DHCP. The stock firmware (image B) was removed on 2026-10-09 and its flash
+space added to the UBI (see "Dropping the stock image B"); the original layout below is what
+the board ships with.
 
 **Back up first.** The whole NAND (with and without OOB) can be dumped from a running system by
 enabling the DT-disabled controller; the DTS now has it `okay`. Keep `nand_ecc.bin`: every range
@@ -114,10 +116,10 @@ bytes per 512 B, CFE keeps its own BBT in the last blocks):
 |---|---|---|
 | `0x0000000-0x0020000` | CFE ROM + NVRAM | `cfe`, read-only. **Never write.** |
 | `0x0020000-0x0620000` | slot A bootfs (JFFS2 with `cferam.NNN` + kernel) | `bootfs` |
-| `0x0620000-0x3d80000` | slot A rootfs (UBI) | `ubi` (auto-attached by OpenWrt) |
-| `0x3d80000-0x42a0000` | slot B bootfs (stock) | `stock_bootfs`, read-only |
-| `0x42a0000-0x7ae0000` | slot B rootfs (stock) | `stock_rootfs`, read-only |
-| `0x7b00000-0x7f00000` | stock `data` | `stock_data`, read-only (renamed: patch 490 would auto-attach "data") |
+| `0x0620000-0x3d80000` | slot A rootfs (UBI) | stock layout; now part of `ubi` |
+| `0x3d80000-0x42a0000` | slot B bootfs (stock) | removed, part of `ubi` |
+| `0x42a0000-0x7ae0000` | slot B rootfs (stock) | removed, part of `ubi` |
+| `0x7b00000-0x7f00000` | stock `data` (kept) | `stock_data`, read-only (renamed: patch 490 would auto-attach "data") |
 | last 1 MB | CFE BBT | not mapped |
 
 How CFE boots (from the CFE blob and the stock images):
@@ -180,6 +182,21 @@ the read-only squashfs, **before the overlay is mounted**. A newer `.ko` copied 
 therefore ignored at that stage (and removing the `modules-boot.d` symlink on the overlay does not
 help either). A temporary init script can `rmmod`/`insmod` the overlay copy before `network`, but
 the real fix is a rebuilt image: the squashfs then carries the fixed module.
+
+### Dropping the stock image B
+
+Done once the stock firmware is not wanted any more (it can only be restored by writing the backup
+back). The DTS then has a single big `ubi` partition, `0x620000` + `0x74c0000` (to the end of old
+rootfs B, 116.75 MiB, 934 PEBs, 107 MiB of overlay), and no `stock_bootfs`/`stock_rootfs`:
+
+1. In the initramfs, `wipeb.ko` (`nand-install/wipeb.c`) adds writable `bootfs_b`, `rootfs_b` and
+   `ubi_big` partitions. Compare `bootfs_b`/`rootfs_b` with the backup, `flash_erase` both.
+2. **CFE copes with a blank image B**: it prints `Booting from only image` and boots A, so the
+   two images do not have to be present. Test this with a reboot after erasing only `bootfs_b`.
+3. `ubiformat /dev/<ubi_big> -f ubi.bin -y` (ubi.bin carries `rootfs` and an autoresize
+   `rootfs_data`), test `ubiattach`, then write the new `bootfs` of image A **last** (its kernel
+   carries the new DTB). The old overlay is gone: first boot starts from the image defaults.
+4. CFE/NVRAM, `data` and the BBT were compared with the backup afterwards and are unchanged.
 
 ### Updating the rootfs of slot A
 

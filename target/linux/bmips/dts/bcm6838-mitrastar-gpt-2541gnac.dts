@@ -115,9 +115,10 @@
 			#size-cells = <1>;
 
 			/*
-			 * Broadcom dual image layout. OpenWrt lives in image A
-			 * (the stock "image_update" slot), the stock firmware
-			 * stays in image B as a fallback.
+			 * Broadcom dual image layout. The stock firmware (image B) has
+			 * been removed: OpenWrt boots from image A, and its UBI also
+			 * takes the space of the old image B (bootfs + rootfs). CFE only
+			 * looks at the JFFS2 bootfs of image A for cferam + kernel.
 			 */
 			partition@0 {
 				label = "cfe";
@@ -133,19 +134,7 @@
 
 			partition@620000 {
 				label = "ubi";
-				reg = <0x0620000 0x3760000>;
-			};
-
-			partition@3d80000 {
-				label = "stock_bootfs";
-				reg = <0x3d80000 0x0520000>;
-				read-only;
-			};
-
-			partition@42a0000 {
-				label = "stock_rootfs";
-				reg = <0x42a0000 0x3840000>;
-				read-only;
+				reg = <0x0620000 0x74c0000>;
 			};
 
 			partition@7b00000 {
