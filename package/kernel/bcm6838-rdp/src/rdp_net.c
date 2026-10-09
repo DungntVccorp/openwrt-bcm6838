@@ -19,7 +19,10 @@
 #include <linux/interrupt.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/crc32.h>
+#include <linux/mtd/mtd.h>
 #include <asm/r4kcache.h>
+#include <asm/unaligned.h>
 
 #include "rdd.h"
 #include "hwapi_mac.h"
@@ -71,9 +74,58 @@ static bool rx_irq = true;
 module_param(rx_irq, bool, 0444);
 MODULE_PARM_DESC(rx_irq, "Use the Runner RX interrupt instead of timer polling");
 
-static char *macaddr = "a0:65:18:b6:3e:ee";
+static char *macaddr;
 module_param(macaddr, charp, 0444);
-MODULE_PARM_DESC(macaddr, "eth0 MAC address (CFE base MAC by default)");
+MODULE_PARM_DESC(macaddr, "eth0 MAC address (default: base MAC from the CFE NVRAM)");
+
+/*
+ * Broadcom NVRAM_DATA, kept by CFE in the "cfe" partition (flash offset
+ * 0x580): ulVersion, szBootline[256], szBoardId[16], ulMainTpNum, ulPsiSize,
+ * ulNumMacAddrs, ucaBaseMacAddr[6], ... ulCheckSum. The checksum is the raw
+ * (not inverted) CRC32 of the 0x400 bytes with the checksum field zeroed.
+ */
+#define NVRAM_OFFSET		0x580
+#define NVRAM_SIZE		0x400
+#define NVRAM_MAC_OFFSET	0x120
+#define NVRAM_CRC_OFFSET	(NVRAM_SIZE - 4)
+
+static int rdp_nvram_mac(u8 *mac)
+{
+	struct mtd_info *mtd;
+	size_t retlen;
+	u8 *buf;
+	u32 crc;
+	int ret;
+
+	mtd = get_mtd_device_nm("cfe");
+	if (IS_ERR(mtd))
+		return PTR_ERR(mtd);
+	buf = kmalloc(NVRAM_SIZE, GFP_KERNEL);
+	if (!buf) {
+		put_mtd_device(mtd);
+		return -ENOMEM;
+	}
+	ret = mtd_read(mtd, NVRAM_OFFSET, NVRAM_SIZE, &retlen, buf);
+	put_mtd_device(mtd);
+	if (ret == -EUCLEAN)	/* bitflips corrected by ECC */
+		ret = 0;
+	if (!ret && retlen != NVRAM_SIZE)
+		ret = -EIO;
+	if (ret)
+		goto out;
+
+	crc = get_unaligned_be32(buf + NVRAM_CRC_OFFSET);
+	memset(buf + NVRAM_CRC_OFFSET, 0, 4);
+	if (crc32_le(~0, buf, NVRAM_SIZE) != crc) {
+		ret = -EBADMSG;
+		goto out;
+	}
+	memcpy(mac, buf + NVRAM_MAC_OFFSET, ETH_ALEN);
+	ret = is_valid_ether_addr(mac) ? 0 : -EINVAL;
+out:
+	kfree(buf);
+	return ret;
+}
 
 /* ---------------------------------------------------------------- PHY/MAC */
 
@@ -407,10 +459,18 @@ int rdp_net_init(void)
 	rdp = netdev_priv(ndev);
 	rdp->ndev = ndev;
 	ndev->netdev_ops = &rdp_netdev_ops;
-	if (mac_pton(macaddr, mac) && is_valid_ether_addr(mac))
+	if (macaddr && mac_pton(macaddr, mac) && is_valid_ether_addr(mac)) {
 		eth_hw_addr_set(ndev, mac);
-	else
-		eth_hw_addr_random(ndev);
+	} else {
+		ret = rdp_nvram_mac(mac);
+		if (!ret) {
+			pr_info("rdp: base MAC %pM from the CFE NVRAM\n", mac);
+			eth_hw_addr_set(ndev, mac);
+		} else {
+			pr_warn("rdp: no usable MAC in the CFE NVRAM (%d), using a random one\n", ret);
+			eth_hw_addr_random(ndev);
+		}
+	}
 
 	netif_napi_add(ndev, &rdp->napi, rdp_poll);
 	timer_setup(&rdp->poll_timer, rdp_poll_timer, 0);
