@@ -177,11 +177,25 @@ With those in place RX works straight from a NAND boot.
 
 Module load order: `kmod-bcm6838-rdp` is loaded at preinit from `/etc/modules-boot.d`, i.e. from
 the read-only squashfs, **before the overlay is mounted**. A newer `.ko` copied to the overlay is
-therefore ignored at that stage, and removing the `modules-boot.d` symlink on the overlay does not
-help either (the rom one is the one seen at preinit). To test a module without reflashing the
-rootfs, keep the new `.ko` in the overlay and add an init script that runs before `network`
-(`START=10`) and does `rmmod bcm6838_rdp; insmod <overlay .ko>` when it differs from the one in
-`/rom`. For a real install rebuild the image so the squashfs carries the fixed module.
+therefore ignored at that stage (and removing the `modules-boot.d` symlink on the overlay does not
+help either). A temporary init script can `rmmod`/`insmod` the overlay copy before `network`, but
+the real fix is a rebuilt image: the squashfs then carries the fixed module.
+
+### Updating the rootfs of slot A
+
+The volume of the running system cannot be updated in place: `ubiupdatevol` fails with
+`get_exclusive: 2 users for volume 0` because `ubiblock` holds the mounted root (nothing is written
+in that case). Boot the initramfs from CFE instead (it uses no NAND), over a direct cable to the PC
+(CFE is 192.168.1.1, which clashes with the main router on a shared LAN):
+
+1. `r 192.168.1.100:<initramfs>` at the CFE prompt (the initramfs must have the NAND DTS).
+2. The kernel auto-attaches `ubi` and creates `ubiblock0_0`; give the board an address, stop the
+   firewall (the `lan` zone is not up without a DHCP lease) and copy the new `root.squashfs` over.
+3. `ubiblock --remove /dev/ubi0_0`, then `ubiupdatevol /dev/ubi0_0 root.squashfs`, read the volume
+   back and compare the md5. Only `rootfs` is touched: `rootfs_data` (the overlay with the
+   configuration and keys) is kept and the bootfs does not change while the kernel is the same.
+4. Reboot. Remove files left in the overlay that shadow the new rootfs (`rm` them in
+   `/overlay/upper/...` directly, a plain `rm` of a file that exists in the rom creates a whiteout).
 
 ## CPU1 (TP1) - fixed, patch `902-bcm6838-boot-cpu1-with-shared-icache.patch`
 
